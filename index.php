@@ -1,0 +1,372 @@
+<?php
+require_once __DIR__ . '/init.php';
+require_login();
+
+$path = trim((string)parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH), '/');
+$base = trim(basename(__DIR__), '/');
+if ($base && str_starts_with($path, $base . '/')) {
+    $path = substr($path, strlen($base) + 1);
+} elseif ($path === $base) {
+    $path = '';
+}
+$pathRoutes = [
+    'admin' => 'admin',
+    'admin/users' => 'admin_users',
+    'admin/registration-requests' => 'admin_registration_requests',
+    'admin/password-reset-requests' => 'admin_password_reset_requests',
+    'admin/coordinators' => 'admin_coordinators',
+    'admin/partners' => 'admin_partners',
+    'admin/partners/document' => 'admin_partner_document',
+    'admin/programs' => 'admin_programs',
+    'admin/terms' => 'admin_terms',
+    'admin/email-logs' => 'admin_email_logs',
+    'admin/evaluations' => 'admin_evaluations',
+    'admin/ojt-placement' => 'admin_ojt_placement',
+    'admin/reports' => 'admin_reports',
+    'admin/report' => 'admin_report',
+    'admin/recent-activities' => 'admin_recent_activities',
+    'admin/chat' => 'chat',
+    'coordinator' => 'coordinator',
+    'coordinator/manage' => 'coordinator_manage',
+    'coordinator/students' => 'coordinator_students',
+    'coordinator/moa-mou' => 'coordinator_moa_mou',
+    'coordinator/partners/document' => 'coordinator_partner_document',
+    'coordinator/evaluations' => 'coordinator_evaluations',
+    'coordinator/chat' => 'chat',
+    'coordinator/students/final-requirements' => 'coordinator_student_final',
+    'student' => 'student',
+    'student/dashboard' => 'student',
+    'student/records' => 'student_records',
+    'student/reports' => 'student_reports',
+    'student/reports/upload' => 'student_records',
+    'student/timeline' => 'student_timeline',
+    'student/documents' => 'student_documents',
+    'student/documents/final' => 'student_documents_final',
+    'student/documents/other' => 'student_documents_other',
+    'student/endorsement' => 'student_view_endorsement',
+    'student/dtr/resubmit' => 'student_resubmit_dtr',
+    'student/weekly/resubmit' => 'student_resubmit_weekly',
+    'student/settings' => 'student_settings',
+    'student/profile' => 'student_profile',
+    'student/password' => 'student_password',
+    'student/pending' => 'student_pending',
+    'student/chat' => 'chat',
+    'chat' => 'chat',
+    'partner' => 'partner',
+    'partner/portal' => 'partner_portal',
+    'partner/submissions' => 'partner_submissions',
+    'partner/evaluate' => 'partner_evaluate',
+    'partner/endorsement' => 'partner_view_endorsement',
+    'partner/settings' => 'partner_settings',
+    'partner/profile' => 'partner_profile',
+    'partner/password' => 'partner_password',
+    'partner/student-evaluation' => 'partner_student_evaluation',
+    'partner/timeline' => 'partner_timeline',
+    'partner/reports' => 'partner_reports',
+    'partner/reports/export' => 'partner_export_reports',
+    'partner/evaluations' => 'partner_evaluations',
+    'partner/chat' => 'chat',
+];
+$route = $_GET['r'] ?? ($pathRoutes[$path] ?? current_user()['role']);
+$method = $_SERVER['REQUEST_METHOD'];
+
+if ($route === 'chat_api') {
+    if ((current_user()['role'] ?? '') === 'student' && student_is_pending_approval()) {
+        http_response_code(403);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'error' => 'Forbidden'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    require __DIR__ . '/api/async_chat.php';
+    exit;
+}
+
+if ($route === 'psgc_api') {
+    require __DIR__ . '/api/psgc.php';
+    exit;
+}
+
+if ($method === 'POST' && ($_POST['action'] ?? '') === 'mark_all_notifications_read') {
+    verify_csrf();
+    (new Notification(db()))->markAllRead((int)current_user()['id']);
+    flash('success', 'Notifications marked as read.');
+    redirect($_SERVER['HTTP_REFERER'] ?? 'index.php');
+}
+
+if (($_GET['action'] ?? '') === 'read_notification') {
+    $notificationId = (int)($_GET['id'] ?? 0);
+    $userId = (int)current_user()['id'];
+    $notificationModel = new Notification(db());
+    $notification = $notificationModel->findForUser($notificationId, $userId);
+    $notificationModel->markRead($notificationId, $userId);
+    $redirectTo = (string)($_GET['redirect'] ?? 'index.php');
+    if (preg_match('#^(?:[a-z][a-z0-9+.-]*:|//)#i', $redirectTo)) {
+        $redirectTo = 'index.php';
+    }
+    if ((current_user()['role'] ?? '') === 'coordinator' && str_contains($redirectTo, 'r=coordinator_students') && !str_contains($redirectTo, 'focus_student=')) {
+        $link = (string)($notification['link'] ?? '');
+        if (preg_match('/(?:^|[?&])focus_student=(\d+)/', $link, $focusMatch)) {
+            $redirectTo = route_url('coordinator.students', ['focus_student' => (int)$focusMatch[1]]);
+        } elseif (preg_match('/(?:^|[?&])student_id=(\d+)/', $redirectTo, $studentMatch)) {
+            $redirectTo = route_url('coordinator.students', ['focus_student' => (int)$studentMatch[1]]);
+        }
+    }
+    redirect($redirectTo !== '' ? $redirectTo : 'index.php');
+}
+
+$freshUser = (new User(db()))->find((int)current_user()['id']);
+if ($freshUser
+    && ($freshUser['role'] ?? '') === 'student'
+    && (int)($freshUser['password_changed'] ?? 1) === 0
+    && (new StudentRegistrationRequest(db()))->isSelfRegisteredUser((int)$freshUser['id'])) {
+    db()->prepare('UPDATE users SET password_changed = 1 WHERE id = ?')->execute([(int)$freshUser['id']]);
+    $freshUser['password_changed'] = 1;
+}
+$_SESSION['user']['password_changed'] = (int)($freshUser['password_changed'] ?? 1);
+$_SESSION['user_id'] = (int)current_user()['id'];
+$_SESSION['role'] = (string)current_user()['role'];
+
+if ($freshUser && (int)($freshUser['is_active'] ?? 1) !== 1) {
+    $inactiveRole = (string)($freshUser['role'] ?? '');
+    $_SESSION = [];
+    session_regenerate_id(true);
+    $inactiveMessage = match ($inactiveRole) {
+        'partner' => 'Your Host Training Establishment account is inactive. Please contact the system administrator.',
+        'coordinator' => 'Your coordinator account is inactive. Please contact the system administrator.',
+        'admin' => 'Your administrator account is inactive. Please contact another system administrator.',
+        'student' => 'Your account is not active. Please contact your OJT coordinator.',
+        default => 'Your account is inactive. Please contact the system administrator.',
+    };
+    flash('error', $inactiveMessage);
+    redirect($inactiveRole !== '' ? 'auth.php?portal=' . urlencode($inactiveRole) : 'auth.php');
+}
+
+if ((current_user()['role'] ?? '') === 'student') {
+    $studentRecord = (new Student(db()))->findByUser((int)current_user()['id']);
+    if (!$studentRecord) {
+        if ($method === 'POST') {
+            http_response_code(403);
+            exit('Forbidden');
+        }
+        if ($route !== 'student_pending') {
+            redirect('index.php?r=student_pending');
+        }
+        (new StudentController())->pendingApproval();
+        exit;
+    }
+}
+
+if ((int)current_user()['password_changed'] === 0) {
+    $gateRole = (string)(current_user()['role'] ?? '');
+    if ($method === 'POST') {
+        $gateAction = $_POST['action'] ?? '';
+        if ($gateRole === 'partner') {
+            if ($gateAction === 'partner_change_password') {
+                (new PartnerController())->changePassword();
+            }
+            if ($gateAction === 'partner_verify_current_password') {
+                (new PartnerController())->verifyCurrentPassword();
+            }
+        } else {
+            // Students, coordinators, and admins share the password-gate handlers.
+            if ($gateAction === 'student_change_password') {
+                (new StudentController())->changePassword();
+            }
+            if ($gateAction === 'student_verify_current_password') {
+                (new StudentController())->verifyCurrentPassword();
+            }
+        }
+    }
+    if ($gateRole === 'partner') {
+        (new PartnerController())->changePasswordForm();
+        exit;
+    }
+    (new StudentController())->changePasswordForm();
+    exit;
+}
+
+if (current_user()['role'] === 'student') {
+    $studentRecord = (new Student(db()))->findByUser((int)current_user()['id']);
+    if ($studentRecord && (int)($studentRecord['profile_completed'] ?? 0) === 0) {
+        if ($method === 'POST' && ($_POST['action'] ?? '') === 'student_save_profile') {
+            (new StudentController())->saveProfile();
+        }
+        (new StudentController())->profileForm();
+        exit;
+    }
+}
+
+if ($method === 'POST') {
+    $pathActionMap = [
+        'notifications/mark-all-read' => 'mark_all_notifications_read',
+        'admin/coordinators' => 'admin_create_coordinator',
+        'admin/partners' => 'admin_create_company',
+        'admin/partners/programs' => 'admin_update_company_programs',
+        'admin/partners/update' => 'admin_update_company',
+        'admin/users' => 'admin_create_student',
+        'admin/users/toggle' => 'admin_toggle_user',
+        'admin/users/deactivate' => 'admin_deactivate_student',
+        'admin/registration-requests/review' => 'admin_review_registration_request',
+        'admin/registration-requests/delete' => 'admin_delete_registration_request',
+        'admin/password-reset-requests/review' => 'admin_review_password_reset_request',
+        'admin/programs' => 'admin_save_program',
+        'admin/programs/terms' => 'admin_save_term',
+        'admin/programs/terms/delete' => 'admin_delete_term',
+        'admin/terms' => 'admin_save_term',
+        'admin/terms/delete' => 'admin_delete_term',
+        'admin/programs/delete' => 'admin_delete_program',
+        'coordinator/enrollments' => 'coordinator_enroll_student',
+        'coordinator/requirements/review' => 'coordinator_review_requirement',
+        'coordinator/deployments/forward' => 'coordinator_forward_deployment',
+        'student/profile' => 'student_save_profile',
+        'student/change-password' => 'student_change_password',
+        'student/verify-password' => 'student_verify_current_password',
+        'student/requirements/upload' => 'student_upload_requirement',
+        'student/requirements/upload-bulk' => 'student_upload_requirements_bulk',
+        'student/requirements/submit' => 'student_submit_requirements',
+        'student/final/job-description' => 'student_save_final_job_description',
+        'student/final/company-profile' => 'student_save_final_company_profile',
+        'student/final/personal-observation' => 'student_save_final_personal_observation',
+        'student/evaluation/partner' => 'student_save_evaluation_partner',
+        'student/evaluation/coordinator' => 'student_save_evaluation_coordinator',
+        'student/dtr-draft' => 'student_save_dtr_draft',
+        'student/dtr' => 'student_add_dtr',
+        'student/dtr/resubmit' => 'student_resubmit_dtr',
+        'student/weekly-reports' => 'student_add_weekly',
+        'student/weekly/resubmit' => 'student_resubmit_weekly',
+        'student/reports/upload' => 'student_upload_report',
+        'partner/deployments/accept' => 'partner_accept_deployment',
+        'partner/orientation/schedule' => 'partner_schedule_orientation',
+        'partner/orientation/complete' => 'partner_complete_orientation',
+        'partner/evaluations' => 'partner_submit_evaluation',
+        'partner/submissions/dtr/review' => 'partner_review_dtr',
+        'partner/submissions/weekly/review' => 'partner_review_weekly',
+        'partner/submissions/dtr/bulk-review' => 'partner_bulk_review_dtr',
+        'partner/submissions/weekly/bulk-review' => 'partner_bulk_review_weekly',
+        'partner/profile' => 'partner_save_profile',
+        'partner/verify-password' => 'partner_verify_current_password',
+        'partner/change-password' => 'partner_change_password',
+    ];
+    $action = $_POST['action'] ?? ($pathActionMap[$path] ?? '');
+    match ($action) {
+        'mark_all_notifications_read' => (function (): void {
+            verify_csrf();
+            (new Notification(db()))->markAllRead((int)current_user()['id']);
+            flash('success', 'Notifications marked as read.');
+            redirect($_SERVER['HTTP_REFERER'] ?? 'index.php');
+        })(),
+        'admin_create_coordinator' => (new AdminController())->createCoordinator(),
+        'admin_update_coordinator' => (new AdminController())->updateCoordinator(),
+        'admin_create_company' => (new AdminController())->createCompany(),
+        'admin_update_company_programs' => (new AdminController())->updateCompanyPrograms(),
+        'admin_update_company' => (new AdminController())->updateCompany(),
+        'admin_save_program' => (new AdminController())->saveProgram(),
+        'admin_save_term' => (new AdminController())->saveTerm(),
+        'admin_delete_term' => (new AdminController())->deleteTerm(),
+        'admin_delete_program' => (new AdminController())->deleteProgram(),
+        'admin_create_student' => (new AdminController())->createStudent(),
+        'admin_toggle_user' => (new AdminController())->toggleUser(),
+        'admin_deactivate_student' => (new AdminController())->deactivateStudent(),
+        'admin_review_registration_request' => (new AdminController())->reviewRegistrationRequest(),
+        'admin_delete_registration_request' => (new AdminController())->deleteRegistrationRequest(),
+        'admin_review_password_reset_request' => (new AdminController())->reviewPasswordResetRequest(),
+        'coordinator_enroll_student' => (new CoordinatorController())->enrollStudent(),
+        'coordinator_review_requirement' => (new CoordinatorController())->reviewRequirement(),
+        'student_change_password' => (new StudentController())->changePassword(),
+        'student_verify_current_password' => (new StudentController())->verifyCurrentPassword(),
+        'student_save_profile' => (new StudentController())->saveProfile(),
+        'student_upload_requirement' => (new StudentController())->uploadRequirement(),
+        'student_upload_requirements_bulk' => (new StudentController())->uploadRequirementsBulk(),
+        'student_submit_requirements' => (new StudentController())->submitRequirements(),
+        'student_save_dtr_draft' => (new StudentController())->saveDtrDraft(),
+        'student_save_final_job_description' => (new StudentController())->saveFinalJobDescription(),
+        'student_save_final_company_profile' => (new StudentController())->saveFinalCompanyProfile(),
+        'student_save_final_personal_observation' => (new StudentController())->saveFinalPersonalObservation(),
+        'student_save_evaluation_partner' => (new StudentController())->saveStudentEvaluationPartner(),
+        'student_save_evaluation_coordinator' => (new StudentController())->saveStudentEvaluationCoordinator(),
+        'coordinator_forward_deployment' => (new CoordinatorController())->forwardDeployment(),
+        'partner_accept_deployment' => (new PartnerController())->acceptDeployment(),
+        'partner_schedule_orientation' => (new PartnerController())->scheduleOrientation(),
+        'partner_complete_orientation' => (new PartnerController())->completeOrientation(),
+        'student_add_dtr' => (new StudentController())->addDtr(),
+        'student_resubmit_dtr' => (new StudentController())->resubmitDtr(),
+        'student_add_weekly' => (new StudentController())->addWeekly(),
+        'student_resubmit_weekly' => (new StudentController())->resubmitWeekly(),
+        'student_upload_report' => (new StudentController())->addWeekly(),
+        'partner_submit_evaluation' => (new PartnerController())->submitEvaluation(),
+        'partner_review_dtr' => (new PartnerController())->reviewDtr(),
+        'partner_review_weekly' => (new PartnerController())->reviewWeekly(),
+        'partner_bulk_review_dtr' => (new PartnerController())->bulkReviewDtr(),
+        'partner_bulk_review_weekly' => (new PartnerController())->bulkReviewWeekly(),
+        'partner_save_profile' => (new PartnerController())->saveProfile(),
+        'partner_verify_current_password' => (new PartnerController())->verifyCurrentPassword(),
+        'partner_change_password' => (new PartnerController())->changePassword(),
+        default => exit('Unknown action'),
+    };
+    exit;
+}
+
+match ($route) {
+    'admin' => (new AdminController())->dashboard(),
+    'admin_users' => (new AdminController())->manageUsers(),
+    'admin_registration_requests' => (new AdminController())->registrationRequests(),
+    'admin_password_reset_requests' => (new AdminController())->passwordResetRequests(),
+    'admin_coordinators' => (new AdminController())->manageCoordinators(),
+    'admin_check_coordinator_id' => (new AdminController())->checkCoordinatorIdNumber(),
+    'admin_check_coordinator_email' => (new AdminController())->checkCoordinatorEmail(),
+    'admin_check_student_no' => (new AdminController())->checkStudentNo(),
+    'admin_check_student_email' => (new AdminController())->checkStudentEmail(),
+    'admin_partners' => (new AdminController())->managePartners(),
+    'admin_check_partner_email' => (new AdminController())->checkPartnerEmail(),
+    'admin_preview_partner_id' => (new AdminController())->previewPartnerId(),
+    'admin_partner_document' => (new AdminController())->viewPartnerDocument(),
+    'admin_programs' => (new AdminController())->managePrograms(),
+    'admin_terms' => (new AdminController())->manageTerms(),
+    'admin_email_logs' => (new AdminController())->emailLogs(),
+    'admin_evaluations' => (new AdminController())->evaluations(),
+    'admin_student_evaluation' => (new AdminController())->studentEvaluation(),
+    'admin_ojt_placement' => (new AdminController())->ojtPlacement(),
+    'admin_reports' => (new AdminController())->reports(),
+    'admin_report' => (new AdminController())->report(),
+    'admin_recent_activities' => (new AdminController())->recentActivitiesPage(),
+    'coordinator' => (new CoordinatorController())->dashboard(),
+    'coordinator_manage' => (new CoordinatorController())->manage(),
+    'coordinator_students' => (new CoordinatorController())->myStudents(),
+    'coordinator_preview_endorsement' => (new CoordinatorController())->previewEndorsementLetter(),
+    'coordinator_moa_mou' => (new CoordinatorController())->moaMouLibrary(),
+    'coordinator_partner_document' => (new CoordinatorController())->viewPartnerDocument(),
+    'coordinator_evaluations' => (new CoordinatorController())->evaluations(),
+    'coordinator_student_final' => (new CoordinatorController())->studentFinalRequirements(),
+    'staff_view_student_doc' => (new CoordinatorController())->viewStudentDocument(),
+    'student' => (new StudentController())->dashboard(),
+    'student_portal' => (new StudentController())->documents(),
+    'student_records' => (new StudentController())->records(),
+    'student_reports' => (new StudentController())->reports(),
+    'student_report_pdf' => (new StudentController())->exportReportPdf(),
+    'student_timeline' => (new StudentController())->timeline(),
+    'student_documents' => (new StudentController())->documents(),
+    'student_documents_final' => (new StudentController())->documentsFinal(),
+    'student_documents_other' => (new StudentController())->documentsOther(),
+    'student_view_endorsement' => (new StudentController())->viewEndorsementLetter(),
+    'student_settings' => (new StudentController())->settings(),
+    'student_evaluation' => (new StudentController())->evaluation(),
+    'student_profile' => (new StudentController())->profileForm(),
+    'student_password' => (new StudentController())->changePasswordForm(),
+    'student_pending' => (new StudentController())->pendingApproval(),
+    'chat' => (new ChatPageController())->interface(),
+    'partner' => (new PartnerController())->dashboard(),
+    'partner_portal' => (new PartnerController())->portal(),
+    'partner_evaluate' => (new PartnerController())->evaluateForm(),
+    'partner_submissions' => (new PartnerController())->submissions(),
+    'partner_view_endorsement' => (new PartnerController())->viewEndorsementLetter(),
+    'partner_view_requirement_form' => (new PartnerController())->viewRequirementForm(),
+    'partner_settings' => (new PartnerController())->settings(),
+    'partner_profile' => (new PartnerController())->profileForm(),
+    'partner_password' => (new PartnerController())->changePasswordForm(),
+    'partner_student_evaluation' => (new PartnerController())->studentEvaluation(),
+    'partner_timeline' => (new PartnerController())->timeline(),
+    'partner_reports' => (new PartnerController())->reports(),
+    'partner_export_reports' => (new PartnerController())->exportReports(),
+    'partner_evaluations' => (new PartnerController())->evaluations(),
+    default => redirect('index.php?r=' . current_user()['role']),
+};
